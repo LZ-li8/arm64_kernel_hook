@@ -1,0 +1,10 @@
+[package]
+name = "hook-loader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+goblin = "0.10"
+libc = "0.2"
+scroll = "0.13"
