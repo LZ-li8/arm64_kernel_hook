@@ -43,7 +43,7 @@
   管理 hook 元数据和可执行跳板内存。
 
 - `hotpatch.c`
-  text/data 写入后端。优先使用 fixmap + `stop_machine()` 的热补丁路径。
+  text/data 写入后端。优先使用 fixmap + `stop_machine()` 的热补丁路径，并按 patch 范围同步 I-cache。
 
 ### 1.3 运行环境支撑层
 
@@ -158,6 +158,7 @@ typedef struct {
 2. 调用 `branch_func_addr()` 解析真实入口：
    - 如果入口是 `B`，继续追踪跳转目标。
    - 如果入口是 BTI 指令，跳过 BTI。
+   - 如果 BTI 后已经是本框架 hook 形态，则保留当前入口地址，避免卸载时把 origin 解析到 `origin + 4`。
 3. 用 `hook_get_mem_from_origin(origin)` 检查重复 hook。
 4. 从 `hmem.c` 分配 `hook_t`。
 5. 填充：
@@ -189,6 +190,17 @@ typedef struct {
 - `hook_uninstall()` 调用 `hook_patch_text(origin_addr, origin_insts, tramp_insts_num, 0)`。
 
 `head_last = 1` 时，先写入口后面的指令，最后写第 1 条指令，降低其他 CPU 看到半成品入口的概率。
+
+PAC/BTI 场景下，已安装的入口可能是：
+
+```text
+BTI JC
+LDR X17, #8
+RET X17
+addr64
+```
+
+当前 `branch_func_addr_once()` 会识别这种已 hook 入口并返回原地址，不再跳过 BTI。这样 `unhook(func)` 能用正确 origin 找到 hook 记录并正常恢复，不需要依赖 `vfs_open` demo 的兜底恢复。
 
 ## 4. ARM64 指令重定位
 
@@ -410,10 +422,12 @@ hotpatch 使用：
 - 最后一个进入的 CPU 作为 master 执行真实写入。
 - fixmap 临时映射目标物理页。
 - `copy_to_kernel_nofault()` 写入。
-- 对 text patch 执行 cache clean/invalidate。
+- 对 text patch 按 patch 范围执行 cache clean/invalidate。
 - 其他 CPU 等待完成后执行 `isb()`。
 
 这种方式避免长期修改目标页 PTE，也减少并发执行期间看到不一致指令的风险。
+
+注意：`flush_icache_range()` 在 ARM64 上会调用 `kick_all_cpus_sync()`，不能直接放在 `stop_machine()` 回调内部，否则容易与停机回调中的 CPU 等待形成死锁。当前 hotpatch master CPU 在 `stop_machine()` 内使用 `caches_clean_inval_pou(start, end)` 做范围级 cache 同步，随后所有 CPU 通过回调末尾的 `isb()` 完成指令同步。
 
 ### 9.2 fallback 路径
 
@@ -422,7 +436,7 @@ hotpatch 使用：
 - `hook_patch_prepare_pages()` 通过 `pte_from_kva()` 找到涉及页。
 - 临时 `pte_mkwrite()`。
 - 写入 text/data。
-- flush icache 或 barrier。
+- text 写入后调用 `flush_icache_range(addr, addr + len)`；data 写入后执行 barrier。
 - 恢复原 PTE。
 - flush TLB。
 
@@ -450,7 +464,7 @@ target > mod_base && target < mod_end
    - `__cfi_slowpath` 路径直接 return。
 4. 卸载模块时 `restore_kcfi()` 恢复相关 hook。
 
-这也是 README 推荐 inline wrap 和 fp wrap 开启 `enable_kcfi_bypass=1` 的原因。
+因此当前模块初始化阶段会直接执行 `bypass_kcfi()`，不再通过模块参数单独开关。
 
 ## 11. syscall hook 封装
 
@@ -479,7 +493,7 @@ target > mod_base && target < mod_end
 
 1. `hotpatch_init()`
 2. `hook_module_prepare_text()`
-3. 根据 `enable_kcfi_bypass` 调用 `bypass_kcfi()`
+3. 调用 `bypass_kcfi()`
 4. 根据 `enable_selftests` 运行自测
 5. 根据 `enable_vfs_demo` 安装 `vfs_open` demo hook
 
@@ -487,9 +501,17 @@ target > mod_base && target < mod_end
 
 1. `unhook_vfs_open()`
 2. `hook_mem_check_leaks()`
-3. `restore_kcfi()`
-4. `hook_mem_cleanup_all()`
-5. `hook_free(text)`
+3. `hook_mem_cleanup_all()`
+4. `hook_free(text)`
+5. `restore_kcfi()`
+
+当前模块参数默认值偏向真实 `vfs_open` hook 测试：
+
+- `enable_selftests = false`
+- `enable_vfs_demo = true`
+- `enable_inline_selftests = false`
+- `enable_fp_selftests = false`
+- `enable_syscall_selftests = false`
 
 ### 12.1 自测覆盖
 
@@ -512,7 +534,7 @@ target > mod_base && target < mod_end
 - fp wrap：
   - 与 inline wrap 类似，验证 before/after/hits。
 
-如果 `enable_kcfi_bypass=0`，inline hook/wrap 和 fp wrap 自测会被跳过或部分跳过，避免 KCFI 相关崩溃。
+KCFI bypass 当前不是模块参数开关，模块初始化阶段会直接执行 `bypass_kcfi()`，自测是否运行只由 `enable_selftests` 及各 selftest 子开关控制。
 
 ## 13. vfs_open demo
 
@@ -526,6 +548,16 @@ hook(target_func, new_vfs_open, (void **)&back_vfs_open);
 
 这是普通 inline hook 的示例，不使用 chain wrap。
 
+卸载时 `unhook_vfs_open()` 会：
+
+1. 设置 `vfs_hook_unloading = true`，让已进入替换函数的路径只调用原函数，不再打印路径。
+2. 等待 `vfs_open_active` 归零。
+3. 调用通用 `unhook(target_func)`。
+4. 校验 `vfs_open` 入口是否恢复为安装前保存的原始指令。
+5. 如果入口仍是 hook 指令或不匹配，则调用 `hook_patch_text()` 强制恢复，并 retire 对应 hook 内存。
+
+最新测试中，修复 `branch_func_addr()` 对 BTI + hook 入口的解析后，卸载走正常 `unhook -> Hook retired` 路径，`force restore` 兜底没有再触发。
+
 ## 14. 当前实现特点与限制
 
 ### 14.1 特点
@@ -534,6 +566,7 @@ hook(target_func, new_vfs_open, (void **)&back_vfs_open);
 - fp hook 不依赖指令重定位，适合 ops table / syscall table。
 - wrap 支持多个 before/after，并允许修改参数、跳过原函数、修改返回值。
 - patch 后端已有 `stop_machine()` + fixmap 路径。
+- text patch 的 I-cache 同步已收敛到 patch 范围，避免全量 `flush_icache_all()`。
 - retired hook 槽位不复用，降低旧 backup/transit 指针误跳风险。
 - KCFI 绕过仅放行 `mod_base` 到 `mod_end` 的 hook 内存区域。
 

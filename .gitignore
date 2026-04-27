@@ -1,0 +1,11 @@
+.cache
+.tmp_versions
+*.json
+*.o
+*.mod
+*.mod.c
+*.order
+*.symvers
+*.ko
+loader/target/
+

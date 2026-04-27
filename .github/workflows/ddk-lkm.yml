@@ -1,0 +1,94 @@
+name: Build DDK LKM
+
+on:
+  workflow_call:
+    inputs:
+      kmi:
+        description: KMI version
+        required: true
+        type: string
+      android_version:
+        description: Android version
+        required: true
+        type: string
+      kernel_version:
+        description: Kernel version
+        required: true
+        type: string
+      output_name:
+        description: Output ko file name
+        required: true
+        type: string
+      ddk_release:
+        description: DDK release tag suffix
+        required: false
+        default: "20260313"
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ inputs.output_name }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+
+    env:
+      MODULE_NAME: hook_module
+      KBUILD_MODPOST_WARN: "1"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Build module
+        run: |
+          set -euo pipefail
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          echo "KMI: ${{ inputs.kmi }}"
+          echo "Android version: ${{ inputs.android_version }}"
+          echo "Kernel version: ${{ inputs.kernel_version }}"
+          echo "DDK release: ${{ inputs.ddk_release }}"
+
+          if [[ -z "${KDIR:-}" ]]; then
+            echo "KDIR is not set by the DDK container" >&2
+            exit 1
+          fi
+
+          make -C "$KDIR" \
+            M="$GITHUB_WORKSPACE" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC=clang \
+            modules
+
+          test -f "$GITHUB_WORKSPACE/${MODULE_NAME}.ko"
+
+      - name: Prepare artifact
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+          output="$GITHUB_WORKSPACE/out/${{ inputs.output_name }}"
+          cp "$GITHUB_WORKSPACE/${MODULE_NAME}.ko" "$output"
+
+          llvm-strip -d "$output"
+          ls -lh "$output"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.kmi }}-arm64_kernel_hook
+          path: out/${{ inputs.output_name }}
+          if-no-files-found: error

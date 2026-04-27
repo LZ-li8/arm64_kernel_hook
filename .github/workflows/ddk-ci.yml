@@ -1,0 +1,125 @@
+name: DDK Module CI
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.rst"
+      - "**/*.txt"
+      - "**/*.ko"
+      - "compile_commands.json"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.rst"
+      - "**/*.txt"
+      - "**/*.ko"
+      - "compile_commands.json"
+  workflow_dispatch:
+    inputs:
+      kmi:
+        description: Build target KMI, or 'all'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+      ddk_release:
+        description: DDK release tag suffix
+        required: false
+        default: "20260313"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ddk-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+      ddk_release: ${{ steps.prepare.outputs.ddk_release }}
+    steps:
+      - name: Resolve targets
+        id: prepare
+        env:
+          DISPATCH_KMI: ${{ github.event.inputs.kmi }}
+          DISPATCH_DDK_RELEASE: ${{ github.event.inputs.ddk_release }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import re
+          import sys
+
+          supported_kmis = [
+              "android12-5.10",
+              "android13-5.10",
+              "android13-5.15",
+              "android14-5.15",
+              "android14-6.1",
+              "android15-6.6",
+              "android16-6.12",
+          ]
+
+          def make_target(kmi: str) -> dict[str, str]:
+              match = re.fullmatch(r"android(?P<android>\d+)-(?P<kernel>\d+\.\d+)", kmi)
+              if not match:
+                  raise ValueError(f"Invalid supported KMI: {kmi}")
+
+              android_version = match.group("android")
+              kernel_version = match.group("kernel")
+              return {
+                  "ddk_target": kmi,
+                  "android_version": android_version,
+                  "kernel_version": kernel_version,
+                  "output_name": f"arm64_kernel_hook-{kernel_version}-android{android_version}.ko",
+              }
+
+          targets = [make_target(kmi) for kmi in supported_kmis]
+          all_targets = list(targets)
+
+          requested_kmi = (os.environ.get("DISPATCH_KMI") or "all").strip()
+          requested_release = (os.environ.get("DISPATCH_DDK_RELEASE") or "20260313").strip()
+
+          if requested_kmi != "all":
+              targets = [item for item in targets if item["ddk_target"] == requested_kmi]
+              if not targets:
+                  valid = ", ".join(item["ddk_target"] for item in all_targets)
+                  print(f"Unsupported kmi '{requested_kmi}'. Valid values: all, {valid}", file=sys.stderr)
+                  sys.exit(1)
+
+          print(f"matrix={json.dumps({'include': targets}, separators=(',', ':'))}")
+          print(f"ddk_release={requested_release}")
+          PY
+
+  build:
+    name: Build ${{ matrix.ddk_target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    uses: ./.github/workflows/ddk-lkm.yml
+    with:
+      kmi: ${{ matrix.ddk_target }}
+      android_version: ${{ matrix.android_version }}
+      kernel_version: ${{ matrix.kernel_version }}
+      output_name: ${{ matrix.output_name }}
+      ddk_release: ${{ needs.prepare.outputs.ddk_release }}

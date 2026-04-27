@@ -1,6 +1,6 @@
 # kernel_hook
 
-Android arm64 内核 Hook 实验项目，包含：
+Android arm64 内核 Hook 实验项目,来自KernelPatch，包含：
 
 - 内核模块 `hook_module.ko`
 - 自定义 text/data patch 后端
@@ -55,7 +55,7 @@ cargo build --target aarch64-linux-android --release
 
 当前仓库默认使用的 NDK 路径写在：
 
-- [loader/.cargo/config.toml](/home/qiu/Android/kernel_hook/loader/.cargo/config.toml)
+- [loader/.cargo/config.toml](/home/qiu/Android/arm64_kernel_hook/loader/.cargo/config.toml)
 
 ## 设备端加载
 
@@ -67,7 +67,8 @@ cargo run -- --adb-run \
   --device-loader target/aarch64-linux-android/release/hook-loader \
   --name hook_module \
   ../hook_module.ko \
-  enable_selftests=1 enable_kcfi_bypass=0 enable_vfs_demo=0
+  enable_selftests=0 enable_vfs_demo=1 \
+  enable_inline_selftests=0 enable_fp_selftests=0 enable_syscall_selftests=0
 ```
 
 说明：
@@ -89,7 +90,8 @@ adb shell "su -c 'chmod 755 /data/local/tmp/hook_loader/hook-loader && \
   /data/local/tmp/hook_loader/hook-loader \
   --name hook_module \
   /data/local/tmp/hook_loader/hook_module.ko \
-  enable_selftests=1 enable_kcfi_bypass=0 enable_vfs_demo=0'"
+  enable_selftests=0 enable_vfs_demo=1 \
+  enable_inline_selftests=0 enable_fp_selftests=0 enable_syscall_selftests=0'"
 ```
 
 ## 模块参数
@@ -97,15 +99,17 @@ adb shell "su -c 'chmod 755 /data/local/tmp/hook_loader/hook-loader && \
 `lkm.c` 目前支持以下参数：
 
 - `enable_selftests`
-  加载时运行本地自测
-- `enable_kcfi_bypass`
-  安装 KCFI bypass hook
+  加载时运行本地自测，当前默认 `0`
 - `enable_inline_selftests`
-  是否运行 inline hook / inline wrap 自测
+  是否运行 inline hook / inline wrap 自测，当前默认 `0`
 - `enable_fp_selftests`
-  是否运行 fp hook / fp wrap 自测
+  是否运行 fp hook / fp wrap 自测，当前默认 `0`
+- `enable_syscall_selftests`
+  是否运行 `sys_openat` / `sys_openat2` 的 syscall table fp hook / fp wrap 自测，当前默认 `0`
 - `enable_vfs_demo`
-  是否安装 `vfs_open` demo hook
+  是否安装 `vfs_open` demo hook，当前默认 `1`
+
+KCFI bypass 目前在模块初始化时直接执行 `bypass_kcfi()`，不是模块参数开关。
 
 ## 已验证场景
 
@@ -113,31 +117,39 @@ adb shell "su -c 'chmod 755 /data/local/tmp/hook_loader/hook-loader && \
 
 - 设备端 Rust loader 可正常加载模块
 - 参数传递正常
+- 默认功能测试仅启用真实 `vfs_open` demo hook
 - `fp_hook`
 - `fp_hook_wrap`
 - `inline hook`
 - `inline wrap`
 - `enable_vfs_demo=1` 时真实 `vfs_open` hook
-- `rmmod hook_module` 可正常卸载
+- `rmmod hook_module` 可正常卸载，卸载后未触发 `force restore` 兜底
+- `hotpatch` 已从全量 `flush_icache_all()` 改为按 patch 范围做 I-cache 同步
 
 ## 推荐测试组合
 
 ### 仅验证 fp hook
 
 ```text
-enable_selftests=1 enable_kcfi_bypass=0 enable_inline_selftests=0 enable_fp_selftests=1 enable_vfs_demo=0
+enable_selftests=1 enable_inline_selftests=0 enable_fp_selftests=1 enable_syscall_selftests=0 enable_vfs_demo=0
+```
+
+### 仅验证 openat/openat2 syscall fp hook
+
+```text
+enable_selftests=1 enable_inline_selftests=0 enable_fp_selftests=0 enable_syscall_selftests=1 enable_vfs_demo=0
 ```
 
 ### 验证全部自测
 
 ```text
-enable_selftests=1 enable_kcfi_bypass=1 enable_inline_selftests=1 enable_fp_selftests=1 enable_vfs_demo=0
+enable_selftests=1 enable_inline_selftests=1 enable_fp_selftests=1 enable_syscall_selftests=1 enable_vfs_demo=0
 ```
 
 ### 验证真实 vfs hook
 
 ```text
-enable_selftests=0 enable_kcfi_bypass=1 enable_inline_selftests=0 enable_fp_selftests=0 enable_vfs_demo=1
+enable_selftests=0 enable_inline_selftests=0 enable_fp_selftests=0 enable_syscall_selftests=0 enable_vfs_demo=1
 ```
 
 ## 当前限制
