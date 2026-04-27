@@ -1,0 +1,71 @@
+name: Rust Loader CI
+
+on:
+  push:
+    paths:
+      - "loader/**"
+      - ".github/workflows/loader-ci.yml"
+  pull_request:
+    paths:
+      - "loader/**"
+      - ".github/workflows/loader-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: loader-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build hook-loader
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup target add aarch64-linux-android
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loader
+          cache-targets: false
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+
+      - name: Build loader
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+        run: |
+          set -euo pipefail
+
+          cargo build \
+            --target aarch64-linux-android \
+            --release \
+            --manifest-path loader/Cargo.toml
+
+          llvm_strip="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          "$llvm_strip" loader/target/aarch64-linux-android/release/hook-loader
+
+      - name: Upload loader artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: hook-loader-aarch64-linux-android
+          path: loader/target/aarch64-linux-android/release/hook-loader
+          if-no-files-found: error
