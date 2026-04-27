@@ -1,26 +1,46 @@
 name: Build DDK LKM
 
 on:
+  # 允许手动从 Actions 页面触发
+  workflow_dispatch:
+    inputs:
+      kmi:
+        description: 'KMI version (例如: 6.1-android14-11)'
+        required: true
+        default: '6.1-android14-11'
+      android_version:
+        description: 'Android version'
+        required: true
+        default: '14'
+      kernel_version:
+        description: 'Kernel version'
+        required: true
+        default: '6.1'
+      output_name:
+        description: '输出的 ko 文件名'
+        required: true
+        default: 'hook_module.ko'
+      ddk_release:
+        description: 'DDK release tag suffix'
+        required: false
+        default: "20260313"
+
+  # 保留原有的被调用功能（可选）
   workflow_call:
     inputs:
       kmi:
-        description: KMI version
         required: true
         type: string
       android_version:
-        description: Android version
         required: true
         type: string
       kernel_version:
-        description: Kernel version
         required: true
         type: string
       output_name:
-        description: Output ko file name
         required: true
         type: string
       ddk_release:
-        description: DDK release tag suffix
         required: false
         default: "20260313"
         type: string
